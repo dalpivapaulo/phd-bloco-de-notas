@@ -1,0 +1,46 @@
+name: Testar e gerar APK Android
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Instalar dependências
+        run: npm ci --no-audit --no-fund
+
+      - name: Sincronizar arquivos web com Android
+        run: npm run android:sync
+
+      - name: Compilar APK de teste
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Guardar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PHD-Bloco-de-Notas-APK-teste
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
