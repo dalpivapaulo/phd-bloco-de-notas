@@ -1,0 +1,19 @@
+{
+  "name": "phd-bloco-de-notas",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PHD Bloco de Notas - aplicativo multiusuario com funcionamento web e Android.",
+  "scripts": {
+    "build:web": "node -e \"const fs=require('fs');const files=['index.html','styles.css','app.js','config.js','manifest.webmanifest','service-worker.js','icon-192.png','icon-512.png','apple-touch-icon.png'];fs.rmSync('www',{recursive:true,force:true});fs.mkdirSync('www',{recursive:true});for(const f of files){if(!fs.existsSync(f))throw new Error('Arquivo ausente: '+f);fs.copyFileSync(f,'www/'+f)}console.log('www preparado com '+files.length+' arquivos');\"",
+    "android:add": "npm run build:web && cap add android",
+    "android:sync": "npm run build:web && cap sync android",
+    "android:open": "cap open android"
+  },
+  "dependencies": {
+    "@capacitor/android": "8.5.1",
+    "@capacitor/core": "8.5.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.1"
+  }
+}

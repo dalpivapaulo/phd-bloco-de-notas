@@ -1,0 +1,11 @@
+{
+  "appId": "io.github.dalpivapaulo.phdnotas",
+  "appName": "PHD Bloco de Notas",
+  "webDir": "www",
+  "loggingBehavior": "debug",
+  "android": {
+    "allowMixedContent": false,
+    "webContentsDebuggingEnabled": false,
+    "resolveServiceWorkerRequests": true
+  }
+}
