@@ -1,0 +1,435 @@
+(()=>{
+const C=window.PHD_CONFIG||{};
+const K_SESSION="phd_session_v1";
+const K_PROFILE="phd_profile_v3";
+const CACHE_PREFIX="phd_cache_v3_";
+const QUEUE_PREFIX="phd_queue_v3_";
+
+let token=localStorage.getItem(K_SESSION)||"";
+let profile=null;
+let items=[];
+let projectCode="";
+let syncing=false;
+let speechRecognition=null;
+let networkFailed=false;
+
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>\"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+const okCfg=()=>/^https:\/\//.test(C.SUPABASE_URL||"")&&(C.SUPABASE_ANON_KEY||"").length>20;
+const safeParse=(raw,fallback)=>{try{return raw?JSON.parse(raw):fallback}catch{return fallback}};
+const cacheKey=id=>CACHE_PREFIX+id;
+const queueKey=id=>QUEUE_PREFIX+id;
+const isLocalId=id=>String(id||"").startsWith("local-");
+const localId=()=>`local-${crypto.randomUUID?crypto.randomUUID():Date.now().toString(36)+Math.random().toString(36).slice(2)}`;
+const nowISO=()=>new Date().toISOString();
+
+function msg(t){$("authMessage").textContent=t;$("authMessage").classList.remove("hidden")}
+function clr(){$("authMessage").classList.add("hidden")}
+function toast(t){const e=$("toast");e.textContent=t;e.classList.add("show");clearTimeout(toast.t);toast.t=setTimeout(()=>e.classList.remove("show"),2600)}
+function view(id){["startView","codeForm","registerForm","loginForm"].forEach(x=>$(x).classList.toggle("hidden",x!==id));clr()}
+function today(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
+function fdate(x){if(!x)return"Sem data";const[y,m,d]=x.split("-");return`${d}/${m}/${y}`}
+function wday(x){if(!x)return"";const[y,m,d]=x.split("-").map(Number);return new Intl.DateTimeFormat("pt-BR",{weekday:"long",timeZone:"UTC"}).format(new Date(Date.UTC(y,m-1,d)))}
+function bucket(r){if(r.status==="done")return"done";if(!r.due_date)return"future";if(r.due_date<today())return"late";if(r.due_date===today())return"today";return"future"}
+function size(t,p=false){const n=(t||"").length;if(p){if(n>160)return"5.6pt";if(n>110)return"6.2pt";if(n>70)return"6.8pt";return"7.6pt"}if(n>260)return"12px";if(n>180)return"13px";if(n>110)return"14px";return"15px"}
+function capFirst(s){const t=String(s||"").trim();return t?t.charAt(0).toLocaleUpperCase("pt-BR")+t.slice(1):t}
+function normItem(r={}){return{
+  id:String(r.id||localId()),
+  text:String(r.text||"").trim(),
+  due_date:r.due_date||r.due||null,
+  due_time:(r.due_time||r.dueTime||null),
+  priority:["Alta","Média","Baixa"].includes(r.priority)?r.priority:"Média",
+  status:r.status==="done"?"done":"open",
+  created_at:r.created_at||r.createdAt||nowISO(),
+  completed_at:r.completed_at||r.completedAt||null
+}}
+function friendlyError(er){
+  if(er?.network)return"Sem conexão com a internet.";
+  return er?.message||"Ocorreu um erro.";
+}
+
+async function rpc(fn,b={}){
+  if(!okCfg())throw Error("Configuração do Supabase pendente.");
+  let r;
+  try{
+    r=await fetch(`${C.SUPABASE_URL}/rest/v1/rpc/${fn}`,{
+      method:"POST",
+      headers:{apikey:C.SUPABASE_ANON_KEY,"Content-Type":"application/json"},
+      body:JSON.stringify(b)
+    });
+    networkFailed=false;
+  }catch(cause){
+    networkFailed=true;
+    const er=new Error("Sem conexão com a internet.");
+    er.network=true;er.cause=cause;
+    throw er;
+  }
+  const tx=await r.text();let d;
+  try{d=tx?JSON.parse(tx):null}catch{d=tx}
+  if(!r.ok){
+    const er=new Error(d?.message||d?.hint||d?.details||`Erro ${r.status}`);
+    er.status=r.status;throw er;
+  }
+  return d;
+}
+
+function loadCachedProfile(){return safeParse(localStorage.getItem(K_PROFILE),null)}
+function saveCachedProfile(){if(profile?.id)localStorage.setItem(K_PROFILE,JSON.stringify(profile))}
+function loadCache(id){return safeParse(localStorage.getItem(cacheKey(id)),[]).map(normItem).filter(x=>x.text)}
+function saveCache(){if(profile?.id)localStorage.setItem(cacheKey(profile.id),JSON.stringify(items))}
+function getQueue(){return profile?.id?safeParse(localStorage.getItem(queueKey(profile.id)),[]):[]}
+function setQueue(q){if(profile?.id)localStorage.setItem(queueKey(profile.id),JSON.stringify(q));updateSyncStatus()}
+
+function updateSyncStatus(){
+  const bar=$("syncBar"), text=$("syncText");
+  if(!bar||!text||!profile?.id)return;
+  const pending=getQueue().length;
+  bar.className="sync-bar";
+  const offline=!navigator.onLine||networkFailed;
+  if(offline){
+    bar.classList.add("offline");
+    text.textContent=pending?`Sem internet — ${pending} alteração(ões) aguardando sincronização.`:"Sem internet — usando os dados salvos neste aparelho.";
+  }else if(syncing){
+    bar.classList.add("syncing");
+    text.textContent=pending?`Sincronizando ${pending} alteração(ões)...`:"Atualizando...";
+  }else if(pending){
+    bar.classList.add("pending");
+    text.textContent=`Online — ${pending} alteração(ões) aguardando sincronização.`;
+  }else{
+    text.textContent="Tudo sincronizado.";
+  }
+}
+
+function showWorkspace(){
+  $("auth").classList.add("hidden");
+  $("workspace").classList.remove("hidden");
+  $("welcome").textContent=`Olá, ${profile.name}`;
+  $("todayLabel").textContent=new Intl.DateTimeFormat("pt-BR",{dateStyle:"full"}).format(new Date());
+  render();
+  updateSyncStatus();
+}
+
+async function refreshFromServer(){
+  const remote=await rpc("list_reminders",{p_token:token})||[];
+  items=remote.map(normItem);
+  saveCache();render();updateSyncStatus();
+}
+
+function enqueueSave(item){
+  const q=getQueue();
+  const data={text:item.text,due_date:item.due_date||null,due_time:item.due_time||null,priority:item.priority};
+  const existing=q.find(x=>x.type==="save"&&x.id===item.id);
+  if(existing)existing.data=data;
+  else q.push({op:localId(),type:"save",id:item.id,data});
+  setQueue(q);
+}
+function enqueueToggle(id){
+  const q=getQueue();
+  const i=q.findIndex(x=>x.type==="toggle"&&x.id===id);
+  if(i>=0)q.splice(i,1);
+  else q.push({op:localId(),type:"toggle",id});
+  setQueue(q);
+}
+function enqueueDelete(id){
+  let q=getQueue();
+  if(isLocalId(id)){
+    q=q.filter(x=>x.id!==id);
+  }else{
+    q=q.filter(x=>x.id!==id);
+    q.push({op:localId(),type:"delete",id});
+  }
+  setQueue(q);
+}
+function replaceQueuedId(oldId,newId,q){
+  q.forEach(x=>{if(x.id===oldId)x.id=String(newId)});
+}
+
+async function syncQueue(){
+  if(syncing||!token||!profile?.id||!navigator.onLine)return;
+  syncing=true;networkFailed=false;updateSyncStatus();
+  try{
+    let q=getQueue();
+    while(q.length){
+      const op=q[0];
+      if(op.type==="save"){
+        const serverId=await rpc("save_reminder",{
+          p_token:token,
+          p_id:isLocalId(op.id)?null:op.id,
+          p_text:op.data.text,
+          p_due_date:op.data.due_date||null,
+          p_due_time:op.data.due_time||null,
+          p_priority:op.data.priority
+        });
+        const oldId=op.id;
+        q.shift();
+        if(isLocalId(oldId)){
+          const found=items.find(x=>x.id===oldId);
+          if(found)found.id=String(serverId);
+          replaceQueuedId(oldId,String(serverId),q);
+          saveCache();
+        }
+        setQueue(q);
+      }else if(op.type==="toggle"){
+        await rpc("toggle_reminder",{p_token:token,p_id:op.id});
+        q.shift();setQueue(q);
+      }else if(op.type==="delete"){
+        await rpc("delete_reminder",{p_token:token,p_id:op.id});
+        q.shift();setQueue(q);
+      }else{
+        q.shift();setQueue(q);
+      }
+      q=getQueue();
+    }
+    await refreshFromServer();
+  }catch(er){
+    if(!er.network){
+      const m=String(er.message||"");
+      if(/sessão inválida/i.test(m))toast("Sua sessão expirou. Entre novamente para sincronizar.");
+      else toast(`Sincronização pendente: ${friendlyError(er)}`);
+    }
+  }finally{
+    syncing=false;updateSyncStatus();
+  }
+}
+
+async function boot(){
+  const cached=loadCachedProfile();
+  if(!token)throw Error("Sessão inválida");
+  if(navigator.onLine){
+    try{
+      const p=await rpc("current_profile",{p_token:token});
+      profile=Array.isArray(p)?p[0]:p;
+      if(!profile?.id)throw Error("Sessão inválida");
+      saveCachedProfile();
+    }catch(er){
+      if(er.network&&cached?.id)profile=cached;
+      else throw er;
+    }
+  }else{
+    networkFailed=true;
+    profile=cached;
+  }
+  if(!profile?.id)throw Error("Abra o aplicativo com internet pelo menos uma vez para habilitar o modo offline.");
+  items=loadCache(profile.id);
+  showWorkspace();
+  if(navigator.onLine){
+    if(getQueue().length)await syncQueue();
+    else{
+      try{await refreshFromServer()}catch(er){if(!er.network)throw er}
+    }
+  }
+  updateSyncStatus();
+}
+
+function sort(a){
+  const p={Alta:0,Média:1,Baixa:2};
+  return a.sort((x,y)=>{
+    const dc=(x.due_date||"9999").localeCompare(y.due_date||"9999");
+    if(dc)return dc;
+    const tc=(x.due_time||"99:99").localeCompare(y.due_time||"99:99");
+    if(tc)return tc;
+    return (p[x.priority]??9)-(p[y.priority]??9);
+  });
+}
+function note(r){return`<article class="note priority-${esc(r.priority)}" data-id="${esc(r.id)}"><div class="date">${esc(fdate(r.due_date))}</div><div class="weekday">${esc(wday(r.due_date))}</div><div class="time">${esc(r.due_time?r.due_time.slice(0,5):"—")}</div><div class="text" style="font-size:${size(r.text)}">${esc(r.text)}</div></article>`}
+function fill(id,a){$(id).innerHTML=a.length?a.map(note).join(""):'<div class="empty">Nenhum lembrete.</div>'}
+function render(){
+  const g={late:[],today:[],future:[],done:[]};
+  items.forEach(r=>g[bucket(r)].push(r));Object.values(g).forEach(sort);
+  fill("lateGrid",g.late);fill("todayGrid",g.today);fill("futureGrid",g.future);fill("doneGrid",g.done);
+  $("lateSection").classList.toggle("hidden",!g.late.length);
+  [["lateCount","mLate",g.late.length],["todayCount","mToday",g.today.length],["futureCount","mFuture",g.future.length],["doneCount","mDone",g.done.length]].forEach(([a,b,n])=>{$(a).textContent=n;$(b).textContent=n});
+  document.querySelectorAll(".note").forEach(e=>e.addEventListener("click",()=>edit(e.dataset.id)));
+  buildPrint(g);
+}
+
+function openNew(){
+  $("dialogTitle").textContent="Novo lembrete";$("remId").value="";$("remText").value="";$("remDate").value=today();$("remTime").value="";$("remPriority").value="Média";
+  $("deleteBtn").classList.add("hidden");$("doneBtn").classList.add("hidden");$("dialog").showModal();
+}
+function edit(id){
+  const r=items.find(x=>x.id===id);if(!r)return;
+  $("dialogTitle").textContent="Editar lembrete";$("remId").value=r.id;$("remText").value=r.text;$("remDate").value=r.due_date||"";$("remTime").value=r.due_time?r.due_time.slice(0,5):"";$("remPriority").value=r.priority;
+  $("deleteBtn").classList.remove("hidden");$("doneBtn").classList.remove("hidden");$("doneBtn").textContent=r.status==="done"?"Reabrir":"Concluir";$("dialog").showModal();
+}
+
+function initVoice(){
+  const btn=$("micBtn"),status=$("voiceStatus");
+  if(!btn)return;
+  btn.onclick=()=>{
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){
+      toast("Ditado automático indisponível. Use o microfone do teclado.");
+      return;
+    }
+    if(speechRecognition){try{speechRecognition.stop()}catch{}return}
+    const target=$("remText");
+    const base=target.value.trim();
+    speechRecognition=new SR();
+    speechRecognition.lang="pt-BR";
+    speechRecognition.interimResults=true;
+    speechRecognition.continuous=false;
+    btn.classList.add("listening");btn.textContent="⏹️";if(status)status.textContent="Ouvindo...";
+    speechRecognition.onresult=e=>{
+      let spoken="";
+      for(let i=0;i<e.results.length;i++)spoken+=e.results[i][0].transcript;
+      spoken=spoken.trim();
+      if(!base)spoken=capFirst(spoken);
+      target.value=[base,spoken].filter(Boolean).join(base&&spoken?" ":"");
+    };
+    speechRecognition.onerror=e=>{
+      const messages={
+        "not-allowed":"Permissão do microfone negada.",
+        "service-not-allowed":"O navegador bloqueou o reconhecimento de voz.",
+        "no-speech":"Nenhuma fala foi detectada.",
+        "network":"O reconhecimento de voz precisa de internet neste aparelho."
+      };
+      toast(messages[e.error]||"Não foi possível reconhecer a fala.");
+    };
+    speechRecognition.onend=()=>{
+      btn.classList.remove("listening");btn.textContent="🎙️";if(status)status.textContent="";speechRecognition=null;
+    };
+    try{speechRecognition.start()}catch{
+      btn.classList.remove("listening");btn.textContent="🎙️";if(status)status.textContent="";speechRecognition=null;toast("Não foi possível iniciar o microfone.");
+    }
+  };
+}
+
+async function save(){
+  const t=capFirst($("remText").value);
+  if(!t){toast("Digite o lembrete.");return}
+  const id=$("remId").value||localId();
+  const existing=items.find(x=>x.id===id);
+  const row=existing||normItem({id,text:t,status:"open"});
+  row.text=t;row.due_date=$("remDate").value||null;row.due_time=$("remTime").value||null;row.priority=$("remPriority").value;
+  if(!existing)items.unshift(row);
+  saveCache();enqueueSave(row);render();$("dialog").close();
+  if(navigator.onLine){toast("Lembrete salvo.");syncQueue()}else toast("Salvo no aparelho. Vai sincronizar quando a internet voltar.");
+}
+async function del(){
+  const id=$("remId").value;if(!id||!confirm("Excluir este lembrete?"))return;
+  items=items.filter(x=>x.id!==id);saveCache();enqueueDelete(id);render();$("dialog").close();
+  if(navigator.onLine)syncQueue();else toast("Exclusão salva no aparelho.");
+}
+async function toggle(){
+  const id=$("remId").value;if(!id)return;
+  const row=items.find(x=>x.id===id);if(!row)return;
+  row.status=row.status==="done"?"open":"done";row.completed_at=row.status==="done"?nowISO():null;
+  saveCache();enqueueToggle(id);render();$("dialog").close();
+  if(navigator.onLine)syncQueue();else toast("Alteração salva no aparelho.");
+}
+
+async function importBackup(file){
+  try{
+    const raw=JSON.parse(await file.text());
+    const incoming=Array.isArray(raw)?raw:raw?.items;
+    if(!Array.isArray(incoming))throw Error("Backup inválido.");
+    const normalized=incoming.map(normItem).filter(x=>x.text);
+    if(!normalized.length)throw Error("O backup não contém lembretes.");
+    if(!confirm(`Importar ${normalized.length} lembrete(s) para ${profile.name}?`))return;
+
+    const signature=x=>[x.text.trim().toLocaleLowerCase("pt-BR"),x.due_date||"",String(x.due_time||"").slice(0,5),x.priority,x.status].join("|");
+    const existing=new Set(items.map(signature));
+    let added=0;
+    let q=getQueue();
+
+    for(const src of normalized){
+      src.text=capFirst(src.text);
+      if(existing.has(signature(src)))continue;
+      const row={...src,id:localId()};
+      items.push(row);existing.add(signature(row));added++;
+      q.push({op:localId(),type:"save",id:row.id,data:{text:row.text,due_date:row.due_date||null,due_time:row.due_time||null,priority:row.priority}});
+      if(row.status==="done")q.push({op:localId(),type:"toggle",id:row.id});
+    }
+    saveCache();setQueue(q);render();
+    toast(added?`${added} lembrete(s) importado(s).`:"Nenhum lembrete novo para importar.");
+    if(added&&navigator.onLine)syncQueue();
+  }catch(er){
+    alert(er.message||"Backup inválido.");
+  }finally{
+    $("importFile").value="";
+  }
+}
+
+function pnote(r){return`<div class="print-note"><div class="print-date">${esc(fdate(r.due_date))}</div><div class="print-weekday">${esc(wday(r.due_date))}</div><div class="print-time">${esc(r.due_time?r.due_time.slice(0,5):"—")}</div><div class="print-text" style="font-size:${size(r.text,true)}">${esc(r.text)}</div></div>`}
+function psec(t,a,l){a=a.slice(0,l);return a.length?`<section class="print-section"><h3>${t}</h3><div class="print-grid">${a.map(pnote).join("")}</div></section>`:""}
+function buildPrint(g){
+  const ll=Math.min(10,g.late.length),tl=Math.min(10,g.today.length),fl=Math.min(g.late.length?10:20,g.future.length);
+  let h=`<div class="print-page"><div class="print-title">PHD | Bloco de Notas</div>${psec("ATRASADOS",g.late,ll)}${psec("PARA HOJE",g.today,tl)}${psec("FUTUROS",g.future,fl)}</div>`;
+  const r=[...g.late.slice(ll),...g.today.slice(tl),...g.future.slice(fl)];
+  for(let i=0;i<r.length;i+=30)h+=`<div class="print-page"><div class="print-title">PHD | Bloco de Notas</div><section class="print-section"><h3>CONTINUAÇÃO</h3><div class="print-grid">${r.slice(i,i+30).map(pnote).join("")}</div></section></div>`;
+  $("printStage").innerHTML=h;
+}
+
+async function logout(){
+  const pending=getQueue().length;
+  if(pending&&!confirm(`Existem ${pending} alteração(ões) ainda não sincronizadas. Sair mesmo assim?`))return;
+  try{if(token&&navigator.onLine)await rpc("logout_user",{p_token:token})}catch{}
+  localStorage.removeItem(K_SESSION);localStorage.removeItem(K_PROFILE);token="";profile=null;items=[];
+  $("workspace").classList.add("hidden");$("auth").classList.remove("hidden");view("startView");
+}
+
+$("newUserPath").onclick=()=>view("codeForm");
+$("userPath").onclick=()=>view("loginForm");
+document.querySelectorAll(".back").forEach(b=>b.onclick=()=>view("startView"));
+
+$("codeForm").onsubmit=async e=>{
+  e.preventDefault();clr();
+  try{
+    const c=$("projectCode").value.trim();
+    if(await rpc("validate_project_code",{p_code:c})===true){projectCode=c;view("registerForm")}
+    else msg("Código do projeto inválido.");
+  }catch(er){msg(er.network?"Sem internet. O cadastro inicial precisa de conexão.":friendlyError(er))}
+};
+
+$("registerForm").onsubmit=async e=>{
+  e.preventDefault();clr();
+  const p=$("regPin").value;if(p!==$("regPin2").value){msg("Os PINs não conferem.");return}
+  try{
+    const d=await rpc("register_user",{p_project_code:projectCode,p_name:$("regName").value.trim(),p_username:$("regUser").value.trim().toLowerCase(),p_pin:p});
+    const r=Array.isArray(d)?d[0]:d;if(!r?.success)throw Error(r?.message||"Não foi possível criar o usuário.");
+    token=r.session_token;localStorage.setItem(K_SESSION,token);projectCode="";await boot();
+  }catch(er){msg(er.network?"Sem internet. O cadastro inicial precisa de conexão.":friendlyError(er))}
+};
+
+$("loginForm").onsubmit=async e=>{
+  e.preventDefault();clr();
+  try{
+    const d=await rpc("login_user",{p_username:$("loginUser").value.trim().toLowerCase(),p_pin:$("loginPin").value});
+    const r=Array.isArray(d)?d[0]:d;if(!r?.success)throw Error(r?.message||"Login inválido.");
+    token=r.session_token;localStorage.setItem(K_SESSION,token);await boot();
+  }catch(er){msg(er.network?"Sem internet. Para entrar pela primeira vez neste aparelho, conecte-se à internet.":friendlyError(er))}
+};
+
+initVoice();
+$("newBtn").onclick=openNew;
+$("printBtn").onclick=()=>window.print();
+$("logoutBtn").onclick=logout;
+$("importFile").onchange=e=>{const f=e.target.files?.[0];if(f)importBackup(f)};
+$("closeDialog").onclick=()=>$("dialog").close();
+$("cancelBtn").onclick=()=>$("dialog").close();
+$("remForm").onsubmit=e=>{e.preventDefault();save().catch(er=>toast(friendlyError(er)))};
+$("deleteBtn").onclick=()=>del().catch(er=>toast(friendlyError(er)));
+$("doneBtn").onclick=()=>toggle().catch(er=>toast(friendlyError(er)));
+
+window.addEventListener("online",()=>{networkFailed=false;updateSyncStatus();syncQueue()});
+window.addEventListener("offline",()=>{networkFailed=true;updateSyncStatus()});
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&navigator.onLine)syncQueue()});
+setInterval(()=>{if(profile?.id&&navigator.onLine)syncQueue()},30000);
+
+if("serviceWorker"in navigator){
+  window.addEventListener("load",()=>navigator.serviceWorker.register("./service-worker.js").catch(()=>{}));
+}
+
+(async()=>{
+  if(!okCfg()){msg("Próxima etapa: configurar o Supabase no arquivo config.js.");return}
+  if(token){
+    try{await boot();return}
+    catch(er){
+      if(er.network){msg("Sem internet e ainda não há dados salvos neste aparelho.");return}
+      localStorage.removeItem(K_SESSION);localStorage.removeItem(K_PROFILE);token="";
+    }
+  }
+  view("startView");
+})();
+})();
