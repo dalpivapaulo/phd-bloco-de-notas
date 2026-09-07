@@ -1,0 +1,388 @@
+name: Localizar lembretes v16.4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gerar:
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Confirmar base estável v16.3C
+        shell: bash
+        run: |
+          set -e
+
+          test -f index.html
+          test -f styles.css
+          test -f src/app-entry.js
+          test -f package-lock.json
+          test -f android/app/src/main/res/raw/phd_alert.wav
+          test -f android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDVoicePlugin.java
+          test -f android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java
+
+          grep -q 'registerPlugin("PHDVoice")' src/app-entry.js
+          grep -q 'registerPlugin("PHDPrint")' src/app-entry.js
+          grep -q 'await PHDPrint.print()' src/app-entry.js
+          grep -q 'LocalNotifications' src/app-entry.js
+          grep -q 'Aviso sonoro curto' index.html
+
+          if grep -q 'id="searchInput"' index.html; then
+            echo "A função Localizar já está presente. Interrompendo para não duplicar código."
+            exit 1
+          fi
+
+          sha256sum \
+            android/app/src/main/res/raw/phd_alert.wav \
+            android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDVoicePlugin.java \
+            android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java \
+            android/app/src/main/java/io/github/dalpivapaulo/phdnotas/MainActivity.java \
+            > /tmp/phd-critical-before.sha256
+
+          echo "Base estável confirmada."
+
+      - name: Adicionar somente Localizar lembretes
+        shell: bash
+        run: |
+          set -e
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # ---------- index.html ----------
+          p = Path("index.html")
+          s = p.read_text(encoding="utf-8")
+
+          sync_marker = '<div id="syncBar" class="sync-bar" aria-live="polite"><span class="sync-dot"></span><span id="syncText">Verificando sincronização...</span></div><div id="appVersion" class="app-version" aria-live="polite">Carregando versão...</div>'
+          search_html = '<div id="syncBar" class="sync-bar" aria-live="polite"><span class="sync-dot"></span><span id="syncText">Verificando sincronização...</span></div><section class="search-panel" aria-label="Localizar lembretes"><label for="searchInput">Localizar lembrete</label><div class="search-row"><input id="searchInput" type="search" placeholder="Digite uma palavra ou nome..." autocomplete="off" spellcheck="false"><button id="clearSearchBtn" class="btn search-clear hidden" type="button">Limpar</button></div><div id="searchStatus" class="search-status" aria-live="polite">Pesquise em todos os lembretes, inclusive concluídos.</div></section><div id="appVersion" class="app-version" aria-live="polite">Carregando versão...</div>'
+
+          if s.count(sync_marker) != 1:
+              raise SystemExit("SEGURANÇA: não encontrei exatamente uma vez o ponto de inserção do Localizar.")
+          s = s.replace(sync_marker, search_html, 1)
+
+          replacements = [
+              ('<section class="bucket today">', '<section id="todaySection" class="bucket today">'),
+              ('<section class="bucket future">', '<section id="futureSection" class="bucket future">'),
+              ('<details class="history">', '<details id="historyDetails" class="history">'),
+          ]
+
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f"SEGURANÇA: estrutura inesperada no index.html: {old}")
+              s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding="utf-8")
+
+          # ---------- styles.css ----------
+          p = Path("styles.css")
+          s = p.read_text(encoding="utf-8")
+
+          if ".search-panel{" in s:
+              raise SystemExit("SEGURANÇA: estilos de busca já existem.")
+
+          search_css = r'''
+          .search-panel{margin:0 2px 14px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:12px 14px;box-shadow:0 3px 12px rgba(15,23,42,.04)}
+          .search-panel label{display:block;font-size:13px;font-weight:900;color:#344054;margin-bottom:8px}
+          .search-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
+          .search-row input{min-width:0;padding:11px 12px}
+          .search-clear{padding:10px 13px}
+          .search-status{margin-top:7px;font-size:12px;color:var(--muted);min-height:16px}
+          .search-status.has-results{color:#166534;font-weight:800}
+          .search-status.no-results{color:#b42318;font-weight:800}
+          @media(max-width:430px){.search-row{grid-template-columns:1fr}.search-clear{width:100%}}
+          '''
+
+          p.write_text(s + "\n" + search_css.strip() + "\n", encoding="utf-8")
+
+          # ---------- src/app-entry.js ----------
+          p = Path("src/app-entry.js")
+          s = p.read_text(encoding="utf-8")
+
+          note_marker = 'function note(r){return`<article class="note priority-${esc(r.priority)}" data-id="${esc(r.id)}"><div class="date">${esc(fdate(r.due_date))}</div><div class="weekday">${esc(wday(r.due_date))}</div><div class="time">${esc(r.due_time?r.due_time.slice(0,5):"—")}</div><div class="text" style="font-size:${size(r.text)}">${esc(r.text)}</div></article>`}\n'
+
+          search_helpers = r'''function normalizeSearchText(value){return String(value??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLocaleLowerCase("pt-BR").trim()}
+          function searchTerms(){return normalizeSearchText($("searchInput")?.value||"").split(/\s+/).filter(Boolean)}
+          function matchesSearch(r,terms){if(!terms.length)return true;const hay=normalizeSearchText(r.text);return terms.every(term=>hay.includes(term))}
+          '''
+
+          if s.count(note_marker) != 1:
+              raise SystemExit("SEGURANÇA: não encontrei o ponto exato das funções de exibição.")
+          if "function normalizeSearchText(" in s:
+              raise SystemExit("SEGURANÇA: lógica de pesquisa já existe.")
+          s = s.replace(note_marker, note_marker + search_helpers, 1)
+
+          old_render = '''function render(){
+            const g={late:[],today:[],future:[],done:[]};
+            items.forEach(r=>g[bucket(r)].push(r));Object.values(g).forEach(sort);
+            fill("lateGrid",g.late);fill("todayGrid",g.today);fill("futureGrid",g.future);fill("doneGrid",g.done);
+            $("lateSection").classList.toggle("hidden",!g.late.length);
+            [["lateCount","mLate",g.late.length],["todayCount","mToday",g.today.length],["futureCount","mFuture",g.future.length],["doneCount","mDone",g.done.length]].forEach(([a,b,n])=>{$(a).textContent=n;$(b).textContent=n});
+            document.querySelectorAll(".note").forEach(e=>e.addEventListener("click",()=>edit(e.dataset.id)));
+            buildPrint(g);
+          }
+          '''
+
+          new_render = '''function render(){
+            const all={late:[],today:[],future:[],done:[]};
+            items.forEach(r=>all[bucket(r)].push(r));Object.values(all).forEach(sort);
+
+            const terms=searchTerms();
+            const found=terms.length?items.filter(r=>matchesSearch(r,terms)):items;
+            const shown={late:[],today:[],future:[],done:[]};
+            found.forEach(r=>shown[bucket(r)].push(r));Object.values(shown).forEach(sort);
+
+            fill("lateGrid",shown.late);fill("todayGrid",shown.today);fill("futureGrid",shown.future);fill("doneGrid",shown.done);
+
+            const searching=terms.length>0;
+            $("lateSection").classList.toggle("hidden",searching?!shown.late.length:!all.late.length);
+            $("todaySection").classList.toggle("hidden",searching&&!shown.today.length);
+            $("futureSection").classList.toggle("hidden",searching&&!shown.future.length);
+            $("historyDetails").classList.toggle("hidden",searching&&!shown.done.length);
+            if(searching&&shown.done.length)$("historyDetails").open=true;
+
+            $("lateCount").textContent=shown.late.length;
+            $("todayCount").textContent=shown.today.length;
+            $("futureCount").textContent=shown.future.length;
+            $("doneCount").textContent=shown.done.length;
+
+            $("mLate").textContent=all.late.length;
+            $("mToday").textContent=all.today.length;
+            $("mFuture").textContent=all.future.length;
+            $("mDone").textContent=all.done.length;
+
+            const status=$("searchStatus"),clear=$("clearSearchBtn");
+            if(status){
+              status.classList.remove("has-results","no-results");
+              if(searching){
+                const n=found.length;
+                status.textContent=n===0?"Nenhum lembrete encontrado.":`${n} lembrete${n===1?"":"s"} encontrado${n===1?"":"s"}.`;
+                status.classList.add(n?"has-results":"no-results");
+              }else{
+                status.textContent="Pesquise em todos os lembretes, inclusive concluídos.";
+              }
+            }
+            if(clear)clear.classList.toggle("hidden",!searching);
+
+            document.querySelectorAll(".note").forEach(e=>e.addEventListener("click",()=>edit(e.dataset.id)));
+
+            // A impressão continua usando TODOS os lembretes.
+            // A pesquisa altera somente o que aparece na tela.
+            buildPrint(all);
+          }
+          '''
+
+          if s.count(old_render) != 1:
+              raise SystemExit("SEGURANÇA: a função render atual não corresponde à base estável esperada.")
+          s = s.replace(old_render, new_render, 1)
+
+          events_marker = '''initVoice();
+          $("newBtn").onclick=openNew;
+          '''
+
+          search_events = '''initVoice();
+          const searchInput=$("searchInput");
+          if(searchInput){
+            searchInput.addEventListener("input",render);
+            searchInput.addEventListener("keydown",e=>{
+              if(e.key!=="Enter")return;
+              e.preventDefault();
+              render();
+              requestAnimationFrame(()=>document.querySelector(".note")?.scrollIntoView({behavior:"smooth",block:"center"}));
+            });
+          }
+          $("clearSearchBtn")?.addEventListener("click",()=>{
+            searchInput.value="";
+            render();
+            searchInput.focus();
+          });
+          $("newBtn").onclick=openNew;
+          '''
+
+          if s.count(events_marker) != 1:
+              raise SystemExit("SEGURANÇA: não encontrei o ponto exato para ativar a pesquisa.")
+          s = s.replace(events_marker, search_events, 1)
+
+          p.write_text(s, encoding="utf-8")
+
+          print("Localizar lembretes aplicado somente em index.html, styles.css e src/app-entry.js.")
+          PY
+
+      - name: Validar alteração mínima antes do build
+        shell: bash
+        run: |
+          set -e
+
+          node --check src/app-entry.js
+
+          grep -q 'id="searchInput"' index.html
+          grep -q 'id="clearSearchBtn"' index.html
+          grep -q 'function normalizeSearchText' src/app-entry.js
+          grep -q 'buildPrint(all)' src/app-entry.js
+          grep -q 'await PHDPrint.print()' src/app-entry.js
+          grep -q 'Aviso sonoro curto' index.html
+
+          CHANGED="$(git diff --name-only | sort)"
+          EXPECTED="$(printf '%s\n' index.html src/app-entry.js styles.css | sort)"
+
+          echo "Arquivos alterados antes do build:"
+          printf '%s\n' "$CHANGED"
+
+          if [ "$CHANGED" != "$EXPECTED" ]; then
+            echo "ERRO DE SEGURANÇA: apareceu alteração fora dos 3 arquivos autorizados."
+            exit 1
+          fi
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Instalar dependências sem alterar versões
+        run: npm ci --no-audit --no-fund
+
+      - name: Gerar web e sincronizar Android
+        shell: bash
+        run: |
+          set -e
+          npm run android:sync
+
+          test -f www/index.html
+          test -f www/app.js
+          test -f android/capacitor-cordova-android-plugins/cordova.variables.gradle
+
+          grep -q 'id="searchInput"' www/index.html
+          grep -q 'normalizeSearchText' www/app.js
+          grep -q 'PHDPrint' www/app.js
+
+      - name: Confirmar que funções críticas não foram tocadas
+        shell: bash
+        run: |
+          set -e
+          sha256sum -c /tmp/phd-critical-before.sha256
+          echo "Microfone, impressão nativa, MainActivity e som do alarme permanecem idênticos."
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Definir versão v16.4
+        shell: bash
+        run: |
+          set -e
+
+          VERSION_CODE=$((164000 + GITHUB_RUN_NUMBER))
+          VERSION_NAME="1.16.4.${GITHUB_RUN_NUMBER}"
+
+          export VERSION_CODE VERSION_NAME
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          p = Path("android/app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+
+          s, n1 = re.subn(
+              r'versionCode\s+\d+',
+              f'versionCode {os.environ["VERSION_CODE"]}',
+              s,
+              count=1
+          )
+          s, n2 = re.subn(
+              r'versionName\s+"[^"]+"',
+              f'versionName "{os.environ["VERSION_NAME"]}"',
+              s,
+              count=1
+          )
+
+          if not (n1 and n2):
+              raise SystemExit("Não foi possível alterar somente a identificação da versão.")
+
+          p.write_text(s, encoding="utf-8")
+          PY
+
+      - name: Restaurar chave de assinatura
+        shell: bash
+        run: |
+          set -e
+          test -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" || (echo "Secret ANDROID_KEYSTORE_BASE64 ausente" && exit 1)
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/phd-notas-release.jks
+
+      - name: Compilar APK
+        working-directory: android
+        run: |
+          set -e
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Assinar e validar APK
+        shell: bash
+        run: |
+          set -e
+
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          UNSIGNED="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED="android/app/build/outputs/apk/release/PHD-Notas-aligned.apk"
+          SIGNED="android/app/build/outputs/apk/release/PHD-Notas.apk"
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks android/app/phd-notas-release.jks \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED" \
+            "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+
+      - name: Publicar v16.4
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p downloads
+          cp android/app/build/outputs/apk/release/PHD-Notas.apk downloads/PHD-Notas.apk
+
+          cat > downloads/version.json <<EOF
+          {
+            "versionName": "${VERSION_NAME}",
+            "versionCode": ${VERSION_CODE},
+            "runNumber": ${GITHUB_RUN_NUMBER},
+            "change": "localizar-lembretes",
+            "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          rm -f android/app/phd-notas-release.jks
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            index.html \
+            styles.css \
+            src/app-entry.js \
+            app.js \
+            android/app/build.gradle \
+            downloads/PHD-Notas.apk \
+            downloads/version.json
+
+          git commit -m "v16.4: adicionar localizar lembretes"
+          git push
