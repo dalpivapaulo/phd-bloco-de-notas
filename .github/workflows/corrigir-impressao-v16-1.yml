@@ -1,0 +1,278 @@
+name: Corrigir impressão nativa v16.1 e gerar APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  aplicar-e-gerar:
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Aplicar correção de impressão nativa
+        shell: bash
+        run: |
+          set -e
+
+          test -f src/app-entry.js
+          test -f android/app/src/main/java/io/github/dalpivapaulo/phdnotas/MainActivity.java
+
+          cat > android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java <<'JAVA'
+          package io.github.dalpivapaulo.phdnotas;
+
+          import android.content.Context;
+          import android.print.PrintAttributes;
+          import android.print.PrintDocumentAdapter;
+          import android.print.PrintJob;
+          import android.print.PrintManager;
+          import android.webkit.WebView;
+
+          import com.getcapacitor.JSObject;
+          import com.getcapacitor.Plugin;
+          import com.getcapacitor.PluginCall;
+          import com.getcapacitor.PluginMethod;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+
+          @CapacitorPlugin(name = "PHDPrint")
+          public class PHDPrintPlugin extends Plugin {
+
+              @PluginMethod
+              public void print(PluginCall call) {
+                  if (getActivity() == null || getBridge() == null) {
+                      call.reject("Tela Android indisponível para impressão.");
+                      return;
+                  }
+
+                  getActivity().runOnUiThread(() -> {
+                      try {
+                          WebView webView = getBridge().getWebView();
+                          if (webView == null) {
+                              call.reject("WebView indisponível para impressão.");
+                              return;
+                          }
+
+                          PrintManager printManager =
+                                  (PrintManager) getActivity().getSystemService(Context.PRINT_SERVICE);
+
+                          if (printManager == null) {
+                              call.reject("Serviço de impressão do Android indisponível.");
+                              return;
+                          }
+
+                          String jobName = "PHD - Lembretes";
+                          PrintDocumentAdapter adapter =
+                                  webView.createPrintDocumentAdapter(jobName);
+
+                          PrintAttributes attributes = new PrintAttributes.Builder()
+                                  .setMediaSize(PrintAttributes.MediaSize.ISO_A4)
+                                  .setColorMode(PrintAttributes.COLOR_MODE_MONOCHROME)
+                                  .build();
+
+                          PrintJob job = printManager.print(jobName, adapter, attributes);
+
+                          if (job == null) {
+                              call.reject("O Android não conseguiu criar o trabalho de impressão.");
+                              return;
+                          }
+
+                          JSObject result = new JSObject();
+                          result.put("opened", true);
+                          call.resolve(result);
+
+                      } catch (Exception e) {
+                          call.reject(
+                                  "Falha ao abrir a impressão: " +
+                                  (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()),
+                                  e
+                          );
+                      }
+                  });
+              }
+          }
+          JAVA
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          main = Path("android/app/src/main/java/io/github/dalpivapaulo/phdnotas/MainActivity.java")
+          s = main.read_text(encoding="utf-8")
+          if "registerPlugin(PHDPrintPlugin.class)" not in s:
+              needle = "registerPlugin(PHDVoicePlugin.class);"
+              if needle not in s:
+                  raise SystemExit("Não encontrei o registro do PHDVoice em MainActivity.java")
+              s = s.replace(
+                  needle,
+                  needle + "\n        registerPlugin(PHDPrintPlugin.class);",
+                  1
+              )
+          main.write_text(s, encoding="utf-8")
+
+          app = Path("src/app-entry.js")
+          s = app.read_text(encoding="utf-8")
+
+          voice = 'const PHDVoice = registerPlugin("PHDVoice");'
+          if 'registerPlugin("PHDPrint")' not in s:
+              if voice not in s:
+                  raise SystemExit("Não encontrei o plugin PHDVoice em app-entry.js")
+              s = s.replace(
+                  voice,
+                  voice + '\nconst PHDPrint = registerPlugin("PHDPrint");',
+                  1
+              )
+
+          old = '$("printBtn").onclick=()=>window.print();'
+          new = '''$("printBtn").onclick=async()=>{
+            if(isNativeApp()){
+              try{
+                await PHDPrint.print();
+              }catch(er){
+                console.error("Falha na impressão nativa",er);
+                toast("Não foi possível abrir a impressão no Android.");
+              }
+            }else{
+              window.print();
+            }
+          };'''
+
+          if old in s:
+              s = s.replace(old, new, 1)
+          elif "await PHDPrint.print()" not in s:
+              raise SystemExit("Não encontrei o manipulador atual do botão Imprimir.")
+
+          app.write_text(s, encoding="utf-8")
+          PY
+
+          grep -q 'registerPlugin(PHDPrintPlugin.class)' android/app/src/main/java/io/github/dalpivapaulo/phdnotas/MainActivity.java
+          grep -q '@CapacitorPlugin(name = "PHDPrint")' android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java
+          grep -q 'registerPlugin("PHDPrint")' src/app-entry.js
+          grep -q 'await PHDPrint.print()' src/app-entry.js
+          echo "Correção de impressão nativa aplicada."
+
+      - name: Instalar dependências e gerar bundle
+        shell: bash
+        run: |
+          npm install --no-audit --no-fund
+          npm run bundle
+          node --check app.js
+          grep -q "PHDPrint" app.js
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Sincronizar Capacitor
+        run: npm run android:sync
+
+      - name: Validar integração de impressão
+        shell: bash
+        run: |
+          test -f android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java
+          grep -q 'registerPlugin(PHDPrintPlugin.class)' android/app/src/main/java/io/github/dalpivapaulo/phdnotas/MainActivity.java
+          grep -q 'createPrintDocumentAdapter' android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java
+          grep -q 'PrintManager' android/app/src/main/java/io/github/dalpivapaulo/phdnotas/PHDPrintPlugin.java
+          echo "Integração Android PrintManager validada."
+
+      - name: Definir versão verificável
+        shell: bash
+        run: |
+          VERSION_CODE=$((161000 + GITHUB_RUN_NUMBER))
+          VERSION_NAME="1.16.1.${GITHUB_RUN_NUMBER}"
+          export VERSION_CODE VERSION_NAME
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re
+
+          p = Path("android/app/build.gradle")
+          s = p.read_text(encoding="utf-8")
+          s,n1 = re.subn(
+              r'versionCode\s+\d+',
+              f'versionCode {os.environ["VERSION_CODE"]}',
+              s,
+              count=1
+          )
+          s,n2 = re.subn(
+              r'versionName\s+"[^"]+"',
+              f'versionName "{os.environ["VERSION_NAME"]}"',
+              s,
+              count=1
+          )
+          if not (n1 and n2):
+              raise SystemExit("Falha ao definir versionCode/versionName")
+          p.write_text(s, encoding="utf-8")
+          print("Versão:", os.environ["VERSION_NAME"], os.environ["VERSION_CODE"])
+          PY
+
+      - name: Restaurar chave de assinatura
+        shell: bash
+        run: |
+          test -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" || (echo "Secret ANDROID_KEYSTORE_BASE64 ausente" && exit 1)
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/phd-notas-release.jks
+
+      - name: Compilar APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Assinar e validar APK
+        shell: bash
+        run: |
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          UNSIGNED="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED="android/app/build/outputs/apk/release/PHD-Notas-aligned.apk"
+          SIGNED="android/app/build/outputs/apk/release/PHD-Notas.apk"
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks android/app/phd-notas-release.jks \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED" \
+            "$ALIGNED"
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+
+      - name: Publicar e salvar v16.1 no repositório
+        shell: bash
+        run: |
+          mkdir -p downloads
+          cp android/app/build/outputs/apk/release/PHD-Notas.apk downloads/PHD-Notas.apk
+
+          cat > downloads/version.json <<EOF
+          {
+            "versionName": "${VERSION_NAME}",
+            "versionCode": ${VERSION_CODE},
+            "runNumber": ${GITHUB_RUN_NUMBER},
+            "feature": "impressao-nativa-android",
+            "generatedAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
+
+          rm -f android/app/phd-notas-release.jks
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add src/app-entry.js app.js android downloads
+          git commit -m "Corrigir impressão nativa Android ${VERSION_NAME}" || true
+          git push
