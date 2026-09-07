@@ -1,10 +1,10 @@
 package io.github.dalpivapaulo.phdnotas;
 
 import android.Manifest;
-import android.app.AlarmManager;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
 import android.provider.Settings;
 
 import com.getcapacitor.JSObject;
@@ -97,9 +97,47 @@ public class PHDAlarmPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void canScheduleExact(PluginCall call) {
+    public void getSetupStatus(PluginCall call) {
+        boolean notificationsAllowed =
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                        || getPermissionState("notifications") == PermissionState.GRANTED;
+
+        boolean exactAllowed = PHDAlarmScheduler.canScheduleExact(getContext());
+
+        PowerManager pm =
+                (PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE);
+
+        boolean batteryUnrestricted =
+                pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+
         JSObject result = new JSObject();
-        result.put("allowed", PHDAlarmScheduler.canScheduleExact(getContext()));
+        result.put("notificationsAllowed", notificationsAllowed);
+        result.put("exactAlarmAllowed", exactAllowed);
+        result.put("batteryUnrestricted", batteryUnrestricted);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void requestNotificationAccess(PluginCall call) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && getPermissionState("notifications") != PermissionState.GRANTED) {
+            requestPermissionForAlias("notifications", call, "notificationRequestCallback");
+            return;
+        }
+
+        JSObject result = new JSObject();
+        result.put("allowed", true);
+        call.resolve(result);
+    }
+
+    @PermissionCallback
+    private void notificationRequestCallback(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put(
+                "allowed",
+                Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                        || getPermissionState("notifications") == PermissionState.GRANTED
+        );
         call.resolve(result);
     }
 
@@ -117,6 +155,52 @@ public class PHDAlarmPlugin extends Plugin {
                 Intent intent = new Intent(Settings.ACTION_SETTINGS);
                 getActivity().startActivity(intent);
             }
+        }
+
+        JSObject result = new JSObject();
+        result.put("opened", true);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void requestBatteryUnrestricted(PluginCall call) {
+        PowerManager pm =
+                (PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE);
+
+        boolean unrestricted =
+                pm != null && pm.isIgnoringBatteryOptimizations(getContext().getPackageName());
+
+        if (!unrestricted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                Intent intent = new Intent(
+                        Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                        Uri.parse("package:" + getContext().getPackageName())
+                );
+                getActivity().startActivity(intent);
+            } catch (Exception ignored) {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS);
+                    getActivity().startActivity(intent);
+                } catch (Exception ignoredAgain) {
+                }
+            }
+        }
+
+        JSObject result = new JSObject();
+        result.put("opened", !unrestricted);
+        result.put("alreadyUnrestricted", unrestricted);
+        call.resolve(result);
+    }
+
+    @PluginMethod
+    public void openAppSettings(PluginCall call) {
+        try {
+            Intent intent = new Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getContext().getPackageName())
+            );
+            getActivity().startActivity(intent);
+        } catch (Exception ignored) {
         }
 
         JSObject result = new JSObject();
