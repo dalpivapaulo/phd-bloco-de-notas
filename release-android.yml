@@ -1,0 +1,90 @@
+name: Gerar APK oficial assinado
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Preparar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "21"
+
+      - name: Instalar dependências
+        run: npm ci --no-audit --no-fund
+
+      - name: Sincronizar arquivos web com Android
+        run: npm run android:sync
+
+      - name: Restaurar chave de assinatura
+        shell: bash
+        run: |
+          test -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" || (echo "Secret ANDROID_KEYSTORE_BASE64 ausente" && exit 1)
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/phd-notas-release.jks
+
+      - name: Compilar APK release
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+
+      - name: Assinar APK
+        shell: bash
+        run: |
+          BUILD_TOOLS="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          UNSIGNED="android/app/build/outputs/apk/release/app-release-unsigned.apk"
+          ALIGNED="android/app/build/outputs/apk/release/PHD-Notas-aligned.apk"
+          SIGNED="android/app/build/outputs/apk/release/PHD-Notas.apk"
+
+          test -f "$UNSIGNED" || (echo "APK release não encontrado" && exit 1)
+
+          "$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks android/app/phd-notas-release.jks \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$SIGNED" \
+            "$ALIGNED"
+
+          "$BUILD_TOOLS/apksigner" verify --verbose "$SIGNED"
+
+      - name: Publicar APK em link fixo
+        shell: bash
+        run: |
+          APK="android/app/build/outputs/apk/release/PHD-Notas.apk"
+          TAG="android-latest"
+
+          git tag -f "$TAG" "$GITHUB_SHA"
+          git push origin -f "$TAG"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK" --clobber
+          else
+            gh release create "$TAG" "$APK" \
+              --title "PHD Bloco de Notas - Android" \
+              --notes "Versão oficial assinada do aplicativo Android."
+          fi
