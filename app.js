@@ -91,7 +91,7 @@ function setAlertPref(id,pref){
   map[String(id)]={notify_enabled:!!pref.notify_enabled,wake_screen:!!pref.wake_screen};
   localStorage.setItem(alertKey(),JSON.stringify(map));
 }
-function getAlertPref(id,defaultOn=false){
+function getAlertPref(id,defaultOn=true){
   const map=loadAlertPrefs();
   const key=String(id);
   if(!Object.prototype.hasOwnProperty.call(map,key)){
@@ -123,34 +123,28 @@ function syncAlertControls(){
 }
 
 
-function nativeAlarmApi(){
-  try{return window.Capacitor?.Plugins?.PHDAlarm||null}catch{return null}
+function isNativeApp(){
+  try{return !!window.Capacitor?.isNativePlatform?.()}catch{return false}
+}
+function localNotificationsApi(){
+  try{return window.Capacitor?.Plugins?.LocalNotifications||null}catch{return null}
+}
+function appInfoApi(){
+  try{return window.Capacitor?.Plugins?.App||null}catch{return null}
 }
 
-async function prepareNativeAlertPermissions(){
-  const api=nativeAlarmApi();
-  if(!api)return;
+const ALERT_CHANNEL_WAKE="phd_alert_wake_v15";
+const ALERT_CHANNEL_NORMAL="phd_alert_normal_v15";
 
-  try{
-    let status=await api.getSetupStatus();
-
-    if(!status?.notificationsAllowed){
-      await api.requestNotificationAccess();
-      status=await api.getSetupStatus();
-    }
-
-    // Não abrir mais a tela de bateria automaticamente.
-    // Em alguns fabricantes, "Nenhuma restrição" não é refletido pelo
-    // Android padrão e isso fazia o PHD abrir a mesma tela em todo clique.
-
-    if(!status?.exactAlarmAllowed){
-      toast("Autorize “Alarmes e lembretes” para o aviso acontecer exatamente no horário.");
-      await api.requestExactAlarmAccess();
-    }
-  }catch{}
-}
-function nativeAlarmId(reminderId){
-  return profile?.id?`${profile.id}:${reminderId}`:String(reminderId||"")
+function notificationId(reminderId){
+  const s=`${profile?.id||"anon"}:${String(reminderId||"")}`;
+  let h=0x811c9dc5;
+  for(let i=0;i<s.length;i++){
+    h^=s.charCodeAt(i);
+    h=Math.imul(h,0x01000193);
+  }
+  const n=h&0x7fffffff;
+  return n||1;
 }
 function alarmWhenMs(row){
   if(!row?.due_date||!row?.due_time)return null;
@@ -161,47 +155,221 @@ function alarmWhenMs(row){
   const ms=dt.getTime();
   return Number.isFinite(ms)?ms:null;
 }
+function setAlertRuntimeStatus(text,kind=""){
+  const el=$("alertRuntimeStatus");
+  if(!el)return;
+  el.textContent=text;
+  el.className=`alert-runtime-status${kind?` ${kind}`:""}`;
+}
+async function ensureNotificationChannels(){
+  const api=localNotificationsApi();
+  if(!api||!isNativeApp())return false;
+  await api.createChannel({
+    id:ALERT_CHANNEL_WAKE,
+    name:"Lembretes PHD — destaque",
+    description:"Lembretes com destaque na tela e som do PHD.",
+    sound:"phd_alert.wav",
+    importance:5,
+    visibility:1,
+    lights:true,
+    vibration:false
+  });
+  await api.createChannel({
+    id:ALERT_CHANNEL_NORMAL,
+    name:"Lembretes PHD",
+    description:"Lembretes com som do PHD.",
+    sound:"phd_alert.wav",
+    importance:3,
+    visibility:1,
+    lights:false,
+    vibration:false
+  });
+  return true;
+}
+async function prepareNativeAlertPermissions(promptUser=false){
+  const api=localNotificationsApi();
+  if(!api||!isNativeApp())return {ok:false,reason:"not-native"};
+  try{
+    await ensureNotificationChannels();
+    let p=await api.checkPermissions();
+    if(p?.display!=="granted"&&promptUser)p=await api.requestPermissions();
+    if(p?.display!=="granted"){
+      return {ok:false,reason:"notifications",message:"As notificações do PHD não estão permitidas no Android."};
+    }
+    let exact=null;
+    try{exact=await api.checkExactNotificationSetting()}catch{}
+    if(exact?.exact_alarm&&exact.exact_alarm!=="granted"){
+      return {ok:false,reason:"exact",message:"O Android não liberou o agendamento exato para o PHD."};
+    }
+    return {ok:true};
+  }catch(er){
+    return {ok:false,reason:"plugin",message:er?.message||"Falha ao preparar o sistema de avisos."};
+  }
+}
 async function cancelNativeAlarm(reminderId){
-  const api=nativeAlarmApi();
-  if(!api||!profile?.id||!reminderId)return;
-  try{await api.cancel({id:nativeAlarmId(reminderId)})}catch{}
+  const api=localNotificationsApi();
+  if(!api||!isNativeApp()||!profile?.id||!reminderId)return;
+  try{await api.cancel({notifications:[{id:notificationId(reminderId)}]})}catch{}
+}
+async function pendingNativeAlarm(row){
+  const api=localNotificationsApi();
+  if(!api||!isNativeApp()||!row)return null;
+  try{
+    const id=notificationId(row.id);
+    const pending=await api.getPending();
+    return (pending?.notifications||[]).find(n=>Number(n.id)===id)||null;
+  }catch{return null}
+}
+async function updateAlertRuntimeStatus(row){
+  if(!row){
+    setAlertRuntimeStatus("Será confirmado ao salvar.");
+    return;
+  }
+  const pref=getAlertPref(row.id,true);
+  if(!pref.notify_enabled){
+    setAlertRuntimeStatus("Aviso desativado para este lembrete.","warn");
+    return;
+  }
+  if(!isNativeApp()){
+    setAlertRuntimeStatus("No navegador, o aviso não é garantido. Use o aplicativo Android.","warn");
+    return;
+  }
+  const p=await pendingNativeAlarm(row);
+  if(p){
+    setAlertRuntimeStatus("Aviso confirmado no Android.","ok");
+  }else{
+    const whenMs=alarmWhenMs(row);
+    if(whenMs&&whenMs>Date.now())setAlertRuntimeStatus("Aviso ainda não confirmado no Android.","error");
+    else setAlertRuntimeStatus("Horário já passou; não há aviso pendente.","warn");
+  }
 }
 async function syncNativeAlarm(row,promptPermission=false){
-  const api=nativeAlarmApi();
-  if(!row||!profile?.id)return;
-  const pref=getAlertPref(row.id);
+  const api=localNotificationsApi();
+  if(!row||!profile?.id)return {ok:false,reason:"invalid"};
+  const pref=getAlertPref(row.id,true);
   const whenMs=alarmWhenMs(row);
 
   if(!pref.notify_enabled||row.status==="done"||!whenMs||whenMs<=Date.now()){
-    if(api)await cancelNativeAlarm(row.id);
-    return;
+    if(api&&isNativeApp())await cancelNativeAlarm(row.id);
+    return {ok:true,scheduled:false};
   }
 
-  if(!api){
-    if(promptPermission)toast("O aviso offline no horário será ativado na versão Android do PHD.");
-    return;
+  if(!api||!isNativeApp()){
+    if(promptPermission)setAlertRuntimeStatus("No navegador, o aviso não é garantido. Use o aplicativo Android.","warn");
+    return {ok:false,reason:"not-native",message:"O aviso no horário exige o aplicativo Android."};
   }
 
+  const permission=await prepareNativeAlertPermissions(promptPermission);
+  if(!permission.ok){
+    if(promptPermission)setAlertRuntimeStatus(permission.message||"Aviso não autorizado no Android.","error");
+    return permission;
+  }
+
+  const id=notificationId(row.id);
   try{
+    await api.cancel({notifications:[{id}]});
     const result=await api.schedule({
-      id:nativeAlarmId(row.id),
-      text:row.text,
-      whenMs,
-      wakeScreen:pref.wake_screen
+      notifications:[{
+        id,
+        title:"PHD | Lembrete",
+        body:row.text,
+        largeBody:row.text,
+        channelId:pref.wake_screen?ALERT_CHANNEL_WAKE:ALERT_CHANNEL_NORMAL,
+        autoCancel:true,
+        foreground:true,
+        isExactNotification:true,
+        isExactMandatory:true,
+        schedule:{
+          at:new Date(whenMs),
+          allowWhileIdle:true
+        },
+        extra:{
+          phdApp:"PHD-Bloco-de-Notas",
+          userId:String(profile.id),
+          reminderId:String(row.id),
+          whenMs
+        }
+      }]
     });
 
-    if(promptPermission&&result?.needsExactPermission){
-      toast("Autorize “Alarmes e lembretes” para o PHD avisar exatamente no horário.");
-      setTimeout(()=>api.requestExactAlarmAccess?.().catch(()=>{}),500);
+    if(result?.warning){
+      const m=result.warning.message||"O Android converteu o aviso para um horário não exato.";
+      if(promptPermission)setAlertRuntimeStatus(m,"error");
+      return {ok:false,reason:"warning",message:m};
     }
+
+    const pending=await api.getPending();
+    const confirmed=(pending?.notifications||[]).some(n=>Number(n.id)===id);
+    if(!confirmed){
+      const m="O Android não confirmou o agendamento deste aviso.";
+      if(promptPermission)setAlertRuntimeStatus(m,"error");
+      return {ok:false,reason:"not-pending",message:m};
+    }
+
+    if(promptPermission)setAlertRuntimeStatus("Aviso confirmado no Android.","ok");
+    return {ok:true,scheduled:true};
   }catch(er){
-    if(promptPermission)toast(er?.message||"Não foi possível programar o aviso.");
+    const code=er?.code?` (${er.code})`:"";
+    const m=`${er?.message||"Não foi possível programar o aviso."}${code}`;
+    if(promptPermission)setAlertRuntimeStatus(m,"error");
+    return {ok:false,reason:"schedule",message:m,code:er?.code};
   }
 }
 async function syncAllNativeAlarms(){
-  if(!nativeAlarmApi()||!profile?.id)return;
+  const api=localNotificationsApi();
+  if(!api||!isNativeApp()||!profile?.id)return;
+
+  const permission=await prepareNativeAlertPermissions(false);
+  if(!permission.ok)return;
+
+  let pending=[];
+  try{pending=(await api.getPending())?.notifications||[]}catch{}
+
+  const desired=new Map();
   for(const row of items){
-    await syncNativeAlarm(row,false);
+    const pref=getAlertPref(row.id,true);
+    const whenMs=alarmWhenMs(row);
+    if(pref.notify_enabled&&row.status!=="done"&&whenMs&&whenMs>Date.now()){
+      desired.set(notificationId(row.id),{row,pref,whenMs});
+    }
+  }
+
+  const cancel=[];
+  for(const n of pending){
+    const extra=n?.extra||{};
+    if(extra?.phdApp!=="PHD-Bloco-de-Notas")continue;
+    const id=Number(n.id);
+    if(String(extra.userId)!==String(profile.id)||!desired.has(id)){
+      cancel.push({id});
+    }
+  }
+  if(cancel.length)try{await api.cancel({notifications:cancel})}catch{}
+
+  const pendingMap=new Map((pending||[]).map(n=>[Number(n.id),n]));
+  for(const [id,d] of desired){
+    const p=pendingMap.get(id);
+    const pendingWhen=p?.schedule?.at?new Date(p.schedule.at).getTime():Number(p?.extra?.whenMs||0);
+    const same=!!p&&pendingWhen===d.whenMs&&String(p.body||"")===String(d.row.text||"");
+    if(!same)await syncNativeAlarm(d.row,false);
+  }
+}
+async function showInstalledVersion(){
+  const el=$("appVersion");
+  if(!el)return;
+  if(!isNativeApp()){
+    el.textContent="Versão Web";
+    return;
+  }
+  const api=appInfoApi();
+  if(!api){
+    el.textContent="Android — versão não identificada";
+    return;
+  }
+  try{
+    const info=await api.getInfo();
+    el.textContent=`Android ${info.version} • build ${info.build}`;
+  }catch{
+    el.textContent="Android";
   }
 }
 
@@ -232,13 +400,19 @@ function showWorkspace(){
   $("todayLabel").textContent=new Intl.DateTimeFormat("pt-BR",{dateStyle:"full"}).format(new Date());
   render();
   updateSyncStatus();
-  syncAllNativeAlarms().catch(()=>{});
+  showInstalledVersion().catch(()=>{});
+  if(isNativeApp()){
+    prepareNativeAlertPermissions(true)
+      .then(r=>{if(r?.ok)return syncAllNativeAlarms()})
+      .catch(()=>{});
+  }
 }
 
 async function refreshFromServer(){
   const remote=await rpc("list_reminders",{p_token:token})||[];
   items=remote.map(normItem);
   saveCache();render();updateSyncStatus();
+  await syncAllNativeAlarms();
 }
 
 function enqueueSave(item){
@@ -381,13 +555,17 @@ function showReminderDialog(){
 function openNew(){
   $("dialogTitle").textContent="Novo lembrete";$("remId").value="";$("remText").value="";$("remDate").value=today();$("remTime").value="";$("remPriority").value="Média";
   $("remNotify").checked=true;$("remWakeScreen").checked=true;syncAlertControls();
+  setAlertRuntimeStatus("Será confirmado ao salvar.");
   $("deleteBtn").classList.add("hidden");$("doneBtn").classList.add("hidden");showReminderDialog();
 }
 function edit(id){
   const r=items.find(x=>x.id===id);if(!r)return;
   $("dialogTitle").textContent="Editar lembrete";$("remId").value=r.id;$("remText").value=r.text;$("remDate").value=r.due_date||"";$("remTime").value=r.due_time?r.due_time.slice(0,5):"";$("remPriority").value=r.priority;
   const alertPref=getAlertPref(r.id,true);$("remNotify").checked=alertPref.notify_enabled;$("remWakeScreen").checked=alertPref.wake_screen;syncAlertControls();
+  setAlertRuntimeStatus("Verificando aviso no Android...");
   $("deleteBtn").classList.remove("hidden");$("doneBtn").classList.remove("hidden");$("doneBtn").textContent=r.status==="done"?"Reabrir":"Concluir";showReminderDialog();
+  updateAlertRuntimeStatus(r).catch(()=>{});
+
 }
 
 function initVoice(){
@@ -449,9 +627,29 @@ async function save(){
   row.text=t;row.due_date=$("remDate").value||null;row.due_time=$("remTime").value||null;row.priority=$("remPriority").value;
   if(!existing)items.unshift(row);
   setAlertPref(id,{notify_enabled:$("remNotify").checked,wake_screen:$("remWakeScreen").checked});
-  saveCache();enqueueSave(row);render();$("dialog").close();
-  await syncNativeAlarm(row,true);
-  if(navigator.onLine){toast("Lembrete salvo.");syncQueue()}else toast("Salvo no aparelho. Vai sincronizar quando a internet voltar.");
+  saveCache();enqueueSave(row);render();
+
+  const wantsAlert=$("remNotify").checked;
+  const alarmResult=await syncNativeAlarm(row,true);
+
+  if(navigator.onLine)syncQueue();
+
+  if(wantsAlert&&isNativeApp()&&!alarmResult.ok){
+    const detail=alarmResult.message||"O Android não confirmou o alarme.";
+    alert(`O lembrete foi salvo, mas o AVISO NÃO FOI CONFIRMADO.
+
+${detail}
+
+O PHD não vai fingir que o alarme está funcionando.`);
+    return;
+  }
+
+  $("dialog").close();
+  if(navigator.onLine){
+    toast(wantsAlert&&isNativeApp()?"Lembrete salvo e aviso confirmado.":"Lembrete salvo.");
+  }else{
+    toast(wantsAlert&&isNativeApp()?"Salvo no aparelho e aviso confirmado.":"Salvo no aparelho. Vai sincronizar quando a internet voltar.");
+  }
 }
 async function del(){
   const id=$("remId").value;if(!id||!confirm("Excluir este lembrete?"))return;
@@ -551,6 +749,10 @@ function buildPrint(g){
 async function logout(){
   const pending=getQueue().length;
   if(pending&&!confirm(`Existem ${pending} alteração(ões) ainda não sincronizadas. Sair mesmo assim?`))return;
+  try{
+    const api=localNotificationsApi();
+    if(api&&isNativeApp())await api.cancelAll();
+  }catch{}
   try{if(token&&navigator.onLine)await rpc("logout_user",{p_token:token})}catch{}
   localStorage.removeItem(K_SESSION);localStorage.removeItem(K_PROFILE);token="";profile=null;items=[];
   $("workspace").classList.add("hidden");$("auth").classList.remove("hidden");view("startView");
@@ -592,7 +794,15 @@ initVoice();
 $("newBtn").onclick=openNew;
 $("remNotify").onchange=()=>{
   syncAlertControls();
-  if($("remNotify").checked)prepareNativeAlertPermissions().catch(()=>{});
+  if($("remNotify").checked){
+    setAlertRuntimeStatus("Será confirmado ao salvar.");
+    prepareNativeAlertPermissions(true).catch(()=>{});
+  }else{
+    setAlertRuntimeStatus("Aviso desativado para este lembrete.","warn");
+  }
+};
+$("remWakeScreen").onchange=()=>{
+  if($("remNotify").checked)setAlertRuntimeStatus("Será confirmado ao salvar.");
 };
 $("printBtn").onclick=()=>window.print();
 $("logoutBtn").onclick=logout;
@@ -610,7 +820,20 @@ window.addEventListener("offline",()=>{networkFailed=true;updateSyncStatus()});
 document.addEventListener("visibilitychange",()=>{if(!document.hidden&&navigator.onLine)syncQueue()});
 setInterval(()=>{if(profile?.id&&navigator.onLine)syncQueue()},30000);
 
-if("serviceWorker"in navigator){
+if(isNativeApp()){
+  window.addEventListener("load",async()=>{
+    try{
+      if("serviceWorker"in navigator){
+        const regs=await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r=>r.unregister()));
+      }
+      if(window.caches){
+        const keys=await caches.keys();
+        await Promise.all(keys.map(k=>caches.delete(k)));
+      }
+    }catch{}
+  });
+}else if("serviceWorker"in navigator){
   let reloadingForUpdate=false;
   navigator.serviceWorker.addEventListener("controllerchange",()=>{
     if(reloadingForUpdate)return;
@@ -632,6 +855,7 @@ if("serviceWorker"in navigator){
 }
 
 (async()=>{
+  showInstalledVersion().catch(()=>{});
   if(!okCfg()){msg("Próxima etapa: configurar o Supabase no arquivo config.js.");return}
   if(token){
     try{await boot();return}

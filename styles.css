@@ -177,3 +177,39 @@ dialog{
     grid-column:1;
   }
 }
+
+
+/* v15 — versão visível e diagnóstico real do alarme */
+.app-version{
+  margin-top:6px;
+  font-size:11px;
+  font-weight:800;
+  color:rgba(255,255,255,.82);
+  letter-spacing:.02em;
+}
+.alert-runtime-status{
+  margin-top:10px;
+  padding:9px 10px;
+  border-radius:10px;
+  border:1px solid #d0d5dd;
+  background:#fff;
+  color:#475467;
+  font-size:12px;
+  font-weight:800;
+  line-height:1.35;
+}
+.alert-runtime-status.ok{
+  color:#166534;
+  background:#ecfdf3;
+  border-color:#abefc6;
+}
+.alert-runtime-status.warn{
+  color:#92400e;
+  background:#fffbeb;
+  border-color:#fcd34d;
+}
+.alert-runtime-status.error{
+  color:#b42318;
+  background:#fef3f2;
+  border-color:#fecdca;
+}

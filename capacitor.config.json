@@ -6,6 +6,6 @@
   "android": {
     "allowMixedContent": false,
     "webContentsDebuggingEnabled": false,
-    "resolveServiceWorkerRequests": true
+    "resolveServiceWorkerRequests": false
   }
 }

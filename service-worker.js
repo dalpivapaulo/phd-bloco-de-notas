@@ -1,4 +1,4 @@
-const CACHE_NAME="phd-bloco-notas-v12-mobile";
+const CACHE_NAME="phd-bloco-notas-v15-estavel";
 const APP_SHELL=[
   "./",
   "./index.html",
