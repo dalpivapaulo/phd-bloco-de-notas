@@ -224,3 +224,13 @@ dialog{
   font-weight:700;
 }
 @media(max-width:760px){.app-version{text-align:center;margin:-6px 4px 12px}}
+
+.search-panel{margin:0 2px 14px;background:#fff;border:1px solid var(--line);border-radius:16px;padding:12px 14px;box-shadow:0 3px 12px rgba(15,23,42,.04)}
+.search-panel label{display:block;font-size:13px;font-weight:900;color:#344054;margin-bottom:8px}
+.search-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center}
+.search-row input{min-width:0;padding:11px 12px}
+.search-clear{padding:10px 13px}
+.search-status{margin-top:7px;font-size:12px;color:var(--muted);min-height:16px}
+.search-status.has-results{color:#166534;font-weight:800}
+.search-status.no-results{color:#b42318;font-weight:800}
+@media(max-width:430px){.search-row{grid-template-columns:1fr}.search-clear{width:100%}}

@@ -543,15 +543,56 @@ function sort(a){
   });
 }
 function note(r){return`<article class="note priority-${esc(r.priority)}" data-id="${esc(r.id)}"><div class="date">${esc(fdate(r.due_date))}</div><div class="weekday">${esc(wday(r.due_date))}</div><div class="time">${esc(r.due_time?r.due_time.slice(0,5):"—")}</div><div class="text" style="font-size:${size(r.text)}">${esc(r.text)}</div></article>`}
+function normalizeSearchText(value){return String(value??"").normalize("NFD").replace(/[\u0300-\u036f]/g,"").toLocaleLowerCase("pt-BR").trim()}
+function searchTerms(){return normalizeSearchText($("searchInput")?.value||"").split(/\s+/).filter(Boolean)}
+function matchesSearch(r,terms){if(!terms.length)return true;const hay=normalizeSearchText(r.text);return terms.every(term=>hay.includes(term))}
 function fill(id,a){$(id).innerHTML=a.length?a.map(note).join(""):'<div class="empty">Nenhum lembrete.</div>'}
 function render(){
-  const g={late:[],today:[],future:[],done:[]};
-  items.forEach(r=>g[bucket(r)].push(r));Object.values(g).forEach(sort);
-  fill("lateGrid",g.late);fill("todayGrid",g.today);fill("futureGrid",g.future);fill("doneGrid",g.done);
-  $("lateSection").classList.toggle("hidden",!g.late.length);
-  [["lateCount","mLate",g.late.length],["todayCount","mToday",g.today.length],["futureCount","mFuture",g.future.length],["doneCount","mDone",g.done.length]].forEach(([a,b,n])=>{$(a).textContent=n;$(b).textContent=n});
+  const all={late:[],today:[],future:[],done:[]};
+  items.forEach(r=>all[bucket(r)].push(r));Object.values(all).forEach(sort);
+
+  const terms=searchTerms();
+  const found=terms.length?items.filter(r=>matchesSearch(r,terms)):items;
+  const shown={late:[],today:[],future:[],done:[]};
+  found.forEach(r=>shown[bucket(r)].push(r));Object.values(shown).forEach(sort);
+
+  fill("lateGrid",shown.late);fill("todayGrid",shown.today);fill("futureGrid",shown.future);fill("doneGrid",shown.done);
+
+  const searching=terms.length>0;
+  $("lateSection").classList.toggle("hidden",searching?!shown.late.length:!all.late.length);
+  $("todaySection").classList.toggle("hidden",searching&&!shown.today.length);
+  $("futureSection").classList.toggle("hidden",searching&&!shown.future.length);
+  $("historyDetails").classList.toggle("hidden",searching&&!shown.done.length);
+  if(searching&&shown.done.length)$("historyDetails").open=true;
+
+  $("lateCount").textContent=shown.late.length;
+  $("todayCount").textContent=shown.today.length;
+  $("futureCount").textContent=shown.future.length;
+  $("doneCount").textContent=shown.done.length;
+
+  $("mLate").textContent=all.late.length;
+  $("mToday").textContent=all.today.length;
+  $("mFuture").textContent=all.future.length;
+  $("mDone").textContent=all.done.length;
+
+  const status=$("searchStatus"),clear=$("clearSearchBtn");
+  if(status){
+    status.classList.remove("has-results","no-results");
+    if(searching){
+      const n=found.length;
+      status.textContent=n===0?"Nenhum lembrete encontrado.":`${n} lembrete${n===1?"":"s"} encontrado${n===1?"":"s"}.`;
+      status.classList.add(n?"has-results":"no-results");
+    }else{
+      status.textContent="Pesquise em todos os lembretes, inclusive concluídos.";
+    }
+  }
+  if(clear)clear.classList.toggle("hidden",!searching);
+
   document.querySelectorAll(".note").forEach(e=>e.addEventListener("click",()=>edit(e.dataset.id)));
-  buildPrint(g);
+
+  // A impressão continua usando TODOS os lembretes.
+  // A pesquisa altera somente o que aparece na tela.
+  buildPrint(all);
 }
 
 function showReminderDialog(){
@@ -795,6 +836,21 @@ $("loginForm").onsubmit=async e=>{
 };
 
 initVoice();
+const searchInput=$("searchInput");
+if(searchInput){
+  searchInput.addEventListener("input",render);
+  searchInput.addEventListener("keydown",e=>{
+    if(e.key!=="Enter")return;
+    e.preventDefault();
+    render();
+    requestAnimationFrame(()=>document.querySelector(".note")?.scrollIntoView({behavior:"smooth",block:"center"}));
+  });
+}
+$("clearSearchBtn")?.addEventListener("click",()=>{
+  searchInput.value="";
+  render();
+  searchInput.focus();
+});
 $("newBtn").onclick=openNew;
 $("remNotify").onchange=()=>{
   syncAlertControls();
