@@ -3,6 +3,7 @@ import { LocalNotifications } from "@capacitor/local-notifications";
 import { App } from "@capacitor/app";
 
 const PHDVoice = registerPlugin("PHDVoice");
+const PHDPrint = registerPlugin("PHDPrint");
 
 (()=>{
 const C=window.PHD_CONFIG||{};
@@ -807,7 +808,18 @@ $("remNotify").onchange=()=>{
 $("remWakeScreen").onchange=()=>{
   if($("remNotify").checked)setAlertRuntimeStatus("O Android confirmará o aviso ao salvar.");
 };
-$("printBtn").onclick=()=>window.print();
+$("printBtn").onclick=async()=>{
+  if(isNativeApp()){
+    try{
+      await PHDPrint.print();
+    }catch(er){
+      console.error("Falha na impressão nativa",er);
+      toast("Não foi possível abrir a impressão no Android.");
+    }
+  }else{
+    window.print();
+  }
+};
 $("logoutBtn").onclick=logout;
 $("restoreBackupBtn").onclick=()=>$("importFile").click();
 $("backupBtn").onclick=downloadBackup;

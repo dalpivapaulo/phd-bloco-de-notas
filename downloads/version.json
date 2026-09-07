@@ -1,7 +1,7 @@
 {
-  "versionName": "1.16.1",
-  "versionCode": 160001,
+  "versionName": "1.16.1.1",
+  "versionCode": 161001,
   "runNumber": 1,
-  "commitBase": "fd234e55260e14621285c33c34a86dc6909f03b4",
-  "generatedAt": "2026-09-07T17:00:45Z"
+  "feature": "impressao-nativa-android",
+  "generatedAt": "2026-09-07T17:40:41Z"
 }
