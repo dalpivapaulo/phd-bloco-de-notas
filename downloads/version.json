@@ -1,7 +1,7 @@
 {
-  "versionName": "1.16.1.1",
-  "versionCode": 161001,
+  "versionName": "1.16.3.1",
+  "versionCode": 163001,
   "runNumber": 1,
-  "feature": "impressao-nativa-android",
-  "generatedAt": "2026-09-07T17:40:41Z"
+  "change": "somente-bip-lembrete-curto",
+  "generatedAt": "2026-09-07T18:17:35Z"
 }
