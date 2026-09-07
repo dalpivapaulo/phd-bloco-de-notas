@@ -8,11 +8,11 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.media.AudioManager;
-import android.media.ToneGenerator;
+import android.content.res.AssetFileDescriptor;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.PowerManager;
-import android.os.SystemClock;
 
 import androidx.core.app.NotificationCompat;
 import androidx.core.app.NotificationManagerCompat;
@@ -20,8 +20,8 @@ import androidx.core.content.ContextCompat;
 
 public class PHDAlarmReceiver extends BroadcastReceiver {
 
-    private static final String CHANNEL_ID = "phd_reminders";
-    private static final int BEEP_MS = 3000;
+    // Canal novo para não herdar vibração/som de versões antigas.
+    private static final String CHANNEL_ID = "phd_reminders_v2";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -35,27 +35,65 @@ public class PHDAlarmReceiver extends BroadcastReceiver {
             if (id == null) id = "phd";
             if (text == null || text.trim().isEmpty()) text = "Lembrete do PHD";
 
-            if (wakeScreen) wakeScreen(context);
+            if (wakeScreen) {
+                wakeScreen(context);
+            }
+
             showNotification(context, id, text);
-            playBeep();
+            playThreeSecondBeep(context);
 
             PHDAlarmScheduler.removeStored(context, id);
             pendingResult.finish();
         }).start();
     }
 
-    private void playBeep() {
-        ToneGenerator tone = null;
+    private void playThreeSecondBeep(Context context) {
+        MediaPlayer player = null;
+        AssetFileDescriptor afd = null;
+
         try {
-            tone = new ToneGenerator(AudioManager.STREAM_ALARM, 85);
-            tone.startTone(ToneGenerator.TONE_PROP_BEEP, BEEP_MS);
-            SystemClock.sleep(BEEP_MS + 150L);
+            afd = context.getResources().openRawResourceFd(R.raw.phd_alert);
+            if (afd == null) return;
+
+            player = new MediaPlayer();
+            player.setAudioAttributes(
+                    new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_ALARM)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                            .build()
+            );
+            player.setDataSource(
+                    afd.getFileDescriptor(),
+                    afd.getStartOffset(),
+                    afd.getLength()
+            );
+            player.setLooping(false);
+            player.prepare();
+            player.start();
+
+            long limit = System.currentTimeMillis() + 3500L;
+            while (player.isPlaying() && System.currentTimeMillis() < limit) {
+                try {
+                    Thread.sleep(80L);
+                } catch (InterruptedException ignored) {
+                    break;
+                }
+            }
         } catch (Exception ignored) {
         } finally {
-            if (tone != null) {
+            if (player != null) {
                 try {
-                    tone.stopTone();
-                    tone.release();
+                    player.stop();
+                } catch (Exception ignored) {
+                }
+                try {
+                    player.release();
+                } catch (Exception ignored) {
+                }
+            }
+            if (afd != null) {
+                try {
+                    afd.close();
                 } catch (Exception ignored) {
                 }
             }
@@ -100,21 +138,23 @@ public class PHDAlarmReceiver extends BroadcastReceiver {
                 pendingFlags
         );
 
-        NotificationCompat.Builder builder = new NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(android.R.drawable.ic_popup_reminder)
-                .setContentTitle("PHD | Lembrete")
-                .setContentText(text)
-                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .setCategory(NotificationCompat.CATEGORY_REMINDER)
-                .setAutoCancel(true)
-                .setVibrate(new long[]{0L})
-                .setSilent(true)
-                .setContentIntent(contentIntent);
+        NotificationCompat.Builder builder =
+                new NotificationCompat.Builder(context, CHANNEL_ID)
+                        .setSmallIcon(android.R.drawable.ic_popup_reminder)
+                        .setContentTitle("PHD | Lembrete")
+                        .setContentText(text)
+                        .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+                        .setPriority(NotificationCompat.PRIORITY_HIGH)
+                        .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                        .setAutoCancel(true)
+                        .setSilent(true)
+                        .setContentIntent(contentIntent);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED) {
+                && ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED) {
             return;
         }
 
@@ -141,6 +181,7 @@ public class PHDAlarmReceiver extends BroadcastReceiver {
 
         channel.setDescription("Avisos locais dos lembretes do PHD Bloco de Notas");
         channel.enableVibration(false);
+        channel.setVibrationPattern(null);
         channel.setSound(null, null);
         channel.setLockscreenVisibility(android.app.Notification.VISIBILITY_PRIVATE);
 
