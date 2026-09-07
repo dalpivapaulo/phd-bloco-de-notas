@@ -1,7 +1,7 @@
 {
-  "versionName": "1.15.2",
-  "versionCode": 150002,
-  "runNumber": 2,
-  "commit": "73840b378c85065ade3e56cf634addb492c4e7a2",
-  "generatedAt": "2026-09-07T15:11:07Z"
+  "versionName": "1.16.1",
+  "versionCode": 160001,
+  "runNumber": 1,
+  "commitBase": "fd234e55260e14621285c33c34a86dc6909f03b4",
+  "generatedAt": "2026-09-07T17:00:45Z"
 }

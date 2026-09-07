@@ -213,3 +213,14 @@ dialog{
   background:#fef3f2;
   border-color:#fecdca;
 }
+
+
+/* v16 — identificação da versão instalada */
+.app-version{
+  margin:-7px 4px 14px;
+  text-align:right;
+  color:var(--muted);
+  font-size:11px;
+  font-weight:700;
+}
+@media(max-width:760px){.app-version{text-align:center;margin:-6px 4px 12px}}
